@@ -2,7 +2,7 @@ import asyncio
 
 import flet as ft
 
-from checks import network
+from checks import network, qr
 
 COLORS = {"ok": ft.Colors.GREEN, "warn": ft.Colors.ORANGE, "bad": ft.Colors.RED}
 ICONS = {"ok": ft.Icons.CHECK_CIRCLE, "warn": ft.Icons.WARNING, "bad": ft.Icons.DANGEROUS}
@@ -47,6 +47,57 @@ def network_tab(page: ft.Page) -> ft.Control:
     )
 
 
+def qr_tab(page: ft.Page) -> ft.Control:
+    field = ft.TextField(
+        label="Paste QR text or link",
+        multiline=True,
+        min_lines=3,
+        max_lines=6,
+    )
+    out = ft.Column(spacing=6, scroll=ft.ScrollMode.AUTO, expand=True)
+    progress = ft.ProgressRing(visible=False)
+    button = ft.FilledButton("Inspect", icon=ft.Icons.QR_CODE_2)
+
+    async def run(e):
+        if not (field.value or "").strip():
+            return
+        button.disabled = True
+        progress.visible = True
+        out.controls.clear()
+        page.update()
+
+        r = await asyncio.to_thread(qr.analyze, field.value)
+
+        out.controls.append(
+            ft.Text(
+                {"ok": "Looks fine", "warn": "Check before you pay", "bad": "Do not pay"}[r.level],
+                size=18,
+                weight=ft.FontWeight.BOLD,
+                color=COLORS[r.level],
+            )
+        )
+        for k, v in r.fields.items():
+            out.controls.append(ft.Text(f"{k}: {v}", selectable=True))
+        if len(r.hops) > 1:
+            out.controls.append(ft.Text("Redirect chain:", weight=ft.FontWeight.BOLD))
+            for i, h in enumerate(r.hops):
+                out.controls.append(ft.Text(f"{i + 1}. {h}", selectable=True, size=12))
+        for f in r.findings:
+            out.controls.append(
+                ft.ListTile(
+                    leading=ft.Icon(ICONS[f.level], color=COLORS[f.level]),
+                    title=ft.Text(f.text),
+                    dense=True,
+                )
+            )
+        button.disabled = False
+        progress.visible = False
+        page.update()
+
+    button.on_click = run
+    return ft.Column([field, ft.Row([button, progress]), out], expand=True)
+
+
 def placeholder(title: str) -> ft.Control:
     return ft.Container(ft.Text(f"{title}: coming soon"), alignment=ft.alignment.center, expand=True)
 
@@ -57,7 +108,7 @@ def main(page: ft.Page):
 
     tabs = [
         ("Network", ft.Icons.WIFI, network_tab(page)),
-        ("QR", ft.Icons.QR_CODE_SCANNER, placeholder("QR payment inspector")),
+        ("QR", ft.Icons.QR_CODE_SCANNER, qr_tab(page)),
         ("Prices", ft.Icons.SHOW_CHART, placeholder("Price and latency monitor")),
         ("FX", ft.Icons.CURRENCY_EXCHANGE, placeholder("Remittance and FX fees")),
     ]
