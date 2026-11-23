@@ -2,7 +2,7 @@ import asyncio
 
 import flet as ft
 
-from checks import network, qr
+from checks import network, prices, qr
 
 COLORS = {"ok": ft.Colors.GREEN, "warn": ft.Colors.ORANGE, "bad": ft.Colors.RED}
 ICONS = {"ok": ft.Icons.CHECK_CIRCLE, "warn": ft.Icons.WARNING, "bad": ft.Icons.DANGEROUS}
@@ -98,8 +98,84 @@ def qr_tab(page: ft.Page) -> ft.Control:
     return ft.Column([field, ft.Row([button, progress]), out], expand=True)
 
 
+def prices_tab(page: ft.Page) -> ft.Control:
+    monitor = prices.Monitor()
+    state = {"gen": 0, "running": False}
+
+    asset = ft.Dropdown(
+        value=prices.ASSETS[0],
+        options=[ft.dropdown.Option(a) for a in prices.ASSETS],
+        width=120,
+    )
+    toggle = ft.FilledButton("Start", icon=ft.Icons.PLAY_ARROW)
+    verdict = ft.Text("Press Start to poll exchanges every 5 seconds.", size=16, weight=ft.FontWeight.BOLD)
+    detail = ft.Text("", size=12)
+    rows = ft.Column(spacing=6, scroll=ft.ScrollMode.AUTO, expand=True)
+    footnote = ft.Text(
+        "Binance quotes USDT, the others USD, so ~0.1% gaps can be normal. "
+        "First latency sample includes connection setup.",
+        size=11,
+        italic=True,
+    )
+
+    def render(snap: prices.Snapshot) -> None:
+        verdict.value = snap.message
+        verdict.color = COLORS[snap.level]
+        detail.value = f"Median: {snap.median:,.2f}" if snap.median else ""
+        if snap.notes:
+            detail.value += ("   " if detail.value else "") + " ".join(snap.notes)
+        rows.controls.clear()
+        for q in snap.quotes:
+            if q.ok:
+                title = f"{q.exchange}   {q.mid:,.2f} {q.quote_ccy}"
+                sub = (
+                    f"{q.latency_ms:.0f} ms (avg {q.avg_latency_ms:.0f})   "
+                    f"{q.divergence_pct:+.3f}% vs median   "
+                    f"book spread {q.book_spread_pct:.3f}%"
+                )
+            else:
+                title = q.exchange
+                sub = f"Unreachable: {q.error}"
+            rows.controls.append(
+                ft.ListTile(
+                    leading=ft.Icon(ICONS[q.level], color=COLORS[q.level]),
+                    title=ft.Text(title),
+                    subtitle=ft.Text(sub),
+                    dense=True,
+                )
+            )
+
+    async def loop(gen: int) -> None:
+        while state["running"] and state["gen"] == gen:
+            snap = await asyncio.to_thread(monitor.poll, asset.value)
+            if not (state["running"] and state["gen"] == gen):
+                break
+            render(snap)
+            page.update()
+            await asyncio.sleep(5)
+
+    async def on_toggle(e):
+        if state["running"]:
+            state["running"] = False
+            toggle.content, toggle.icon = "Start", ft.Icons.PLAY_ARROW
+            page.update()
+            return
+        state["running"] = True
+        state["gen"] += 1
+        toggle.content, toggle.icon = "Stop", ft.Icons.STOP
+        verdict.value = "Polling..."
+        page.update()
+        page.run_task(loop, state["gen"])
+
+    toggle.on_click = on_toggle
+    return ft.Column(
+        [ft.Row([asset, toggle]), verdict, detail, rows, footnote],
+        expand=True,
+    )
+
+
 def placeholder(title: str) -> ft.Control:
-    return ft.Container(ft.Text(f"{title}: coming soon"), alignment=ft.alignment.center, expand=True)
+    return ft.Container(ft.Text(f"{title}: coming soon"), alignment=ft.Alignment(0, 0), expand=True)
 
 
 def main(page: ft.Page):
@@ -109,7 +185,7 @@ def main(page: ft.Page):
     tabs = [
         ("Network", ft.Icons.WIFI, network_tab(page)),
         ("QR", ft.Icons.QR_CODE_SCANNER, qr_tab(page)),
-        ("Prices", ft.Icons.SHOW_CHART, placeholder("Price and latency monitor")),
+        ("Prices", ft.Icons.SHOW_CHART, prices_tab(page)),
         ("FX", ft.Icons.CURRENCY_EXCHANGE, placeholder("Remittance and FX fees")),
     ]
     body = ft.Container(tabs[0][2], expand=True)
@@ -125,4 +201,5 @@ def main(page: ft.Page):
     page.add(body)
 
 
-ft.app(target=main)
+if __name__ == "__main__":
+    ft.run(main)
