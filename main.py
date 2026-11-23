@@ -2,7 +2,13 @@ import asyncio
 
 import flet as ft
 
-from checks import network, prices, qr
+from checks import network, prices, qr, scan
+
+try:
+    import flet_camera as fc
+    import flet_permission_handler as fph
+except ImportError:  # camera extras not installed: the scan button explains
+    fc = fph = None
 
 COLORS = {"ok": ft.Colors.GREEN, "warn": ft.Colors.ORANGE, "bad": ft.Colors.RED}
 ICONS = {"ok": ft.Icons.CHECK_CIRCLE, "warn": ft.Icons.WARNING, "bad": ft.Icons.DANGEROUS}
@@ -95,7 +101,103 @@ def qr_tab(page: ft.Page) -> ft.Control:
         page.update()
 
     button.on_click = run
-    return ft.Column([field, ft.Row([button, progress]), out], expand=True)
+
+    # ---- camera scanning (Android, iOS, or the browser build) ----
+    scan_btn = ft.OutlinedButton("Scan with camera", icon=ft.Icons.CAMERA_ALT)
+    scan_status = ft.Text("", size=12)
+    cam_box = ft.Container(height=300, bgcolor=ft.Colors.BLACK, border_radius=8, visible=False)
+    scan_state = {"gen": 0, "active": False}
+    perms = fph.PermissionHandler() if fph else None
+    if perms:
+        page.services.append(perms)
+
+    def camera_supported() -> bool:
+        on_phone = page.platform in (ft.PagePlatform.ANDROID, ft.PagePlatform.IOS)
+        return fc is not None and scan.available() and (page.web or on_phone)
+
+    def close_camera() -> None:
+        scan_state["active"] = False
+        cam_box.content = None
+        cam_box.visible = False
+        scan_btn.content = "Scan with camera"
+        scan_btn.icon = ft.Icons.CAMERA_ALT
+
+    def stop_scan() -> None:
+        """Called when the user leaves this tab, so the camera is released."""
+        scan_state["gen"] += 1
+        close_camera()
+        scan_status.value = ""
+
+    async def on_scan(e):
+        if scan_state["active"]:
+            stop_scan()
+            page.update()
+            return
+        if not camera_supported():
+            scan_status.value = (
+                "Camera scanning works on Android, iOS, or in the browser "
+                "(flet run --web). On desktop, paste the QR text instead."
+            )
+            page.update()
+            return
+        if not page.web and perms:
+            status = await perms.request(fph.Permission.CAMERA)
+            if status != fph.PermissionStatus.GRANTED:
+                scan_status.value = "Camera permission denied. Enable it in system settings."
+                page.update()
+                return
+
+        scan_state["gen"] += 1
+        gen = scan_state["gen"]
+        scan_state["active"] = True
+        cam = fc.Camera(expand=True, preview_enabled=True)
+        cam_box.content = cam
+        cam_box.visible = True
+        scan_btn.content, scan_btn.icon = "Stop scanning", ft.Icons.STOP
+        scan_status.value = "Point the camera at a QR code..."
+        out.controls.clear()
+        page.update()
+
+        found = None
+        try:
+            cams = await cam.get_available_cameras()
+            if not cams:
+                raise RuntimeError("no camera found")
+            back = next((c for c in cams if c.lens_direction == fc.CameraLensDirection.BACK), cams[0])
+            await cam.initialize(
+                description=back,
+                resolution_preset=fc.ResolutionPreset.MEDIUM,
+                enable_audio=False,
+                image_format_group=fc.ImageFormatGroup.JPEG,
+            )
+            while scan_state["active"] and scan_state["gen"] == gen:
+                data = await cam.take_picture()
+                found = await asyncio.to_thread(scan.decode_qr, data)
+                if found:
+                    break
+                await asyncio.sleep(0.3)
+        except Exception as ex:
+            if scan_state["gen"] == gen and scan_state["active"]:
+                scan_status.value = f"Camera error: {ex}"
+
+        if scan_state["gen"] != gen:  # stopped or replaced while we were working
+            return
+        close_camera()
+        if found:
+            scan_status.value = "QR code read. Nothing was opened or paid."
+            field.value = found
+            page.update()
+            await run(None)
+        else:
+            page.update()
+
+    scan_btn.on_click = on_scan
+    col = ft.Column(
+        [field, ft.Row([button, scan_btn, progress], wrap=True), scan_status, cam_box, out],
+        expand=True,
+    )
+    col.data = stop_scan
+    return col
 
 
 def prices_tab(page: ft.Page) -> ft.Control:
@@ -191,6 +293,9 @@ def main(page: ft.Page):
     body = ft.Container(tabs[0][2], expand=True)
 
     def on_nav(e):
+        leaving = body.content
+        if callable(getattr(leaving, "data", None)):
+            leaving.data()  # e.g. release the camera when leaving the QR tab
         body.content = tabs[e.control.selected_index][2]
         page.update()
 
