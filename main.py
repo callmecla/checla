@@ -2,7 +2,7 @@ import asyncio
 
 import flet as ft
 
-from checks import network, prices, qr, scan
+from checks import fx, network, prices, qr, scan
 
 try:
     import flet_camera as fc
@@ -276,6 +276,170 @@ def prices_tab(page: ft.Page) -> ft.Control:
     )
 
 
+def fx_tab(page: ft.Page) -> ft.Control:
+    state = {"mid": None, "quotes": []}
+
+    src = ft.Dropdown(value="USD", label="Send", width=130,
+                      options=[ft.dropdown.Option(c) for c in fx.CURRENCIES])
+    dst = ft.Dropdown(value="PHP", label="Receive", width=130,
+                      options=[ft.dropdown.Option(c) for c in fx.CURRENCIES])
+    rate_btn = ft.OutlinedButton("Get rate", icon=ft.Icons.REFRESH)
+    progress = ft.ProgressRing(visible=False, width=20, height=20)
+    ref_text = ft.Text("", size=12)
+    attribution = ft.Text(
+        spans=[ft.TextSpan("Rates By Exchange Rate API", url="https://www.exchangerate-api.com")],
+        size=11,
+        visible=False,
+    )
+
+    name_f = ft.TextField(label="Provider (e.g. GCash, Wise)", dense=True)
+    pays_f = ft.TextField(keyboard_type=ft.KeyboardType.NUMBER, dense=True, expand=True)
+    gets_f = ft.TextField(keyboard_type=ft.KeyboardType.NUMBER, dense=True, expand=True)
+    rate_f = ft.TextField(label="Rate shown by provider (optional)",
+                          keyboard_type=ft.KeyboardType.NUMBER, dense=True, expand=True)
+    add_btn = ft.FilledButton("Add quote", icon=ft.Icons.ADD)
+    clear_btn = ft.TextButton("Clear all")
+    msg = ft.Text("", size=12, color=ft.Colors.RED)
+    verdict = ft.Text("", size=16, weight=ft.FontWeight.BOLD)
+    results = ft.Column(spacing=4)
+
+    def relabel() -> None:
+        pays_f.label = f"You pay ({src.value})"
+        gets_f.label = f"They receive ({dst.value})"
+
+    relabel()
+
+    def render() -> None:
+        results.controls.clear()
+        mid = state["mid"]
+        if not (mid and state["quotes"]):
+            verdict.value = ""
+            return
+        ranked = fx.rank(state["quotes"], mid.rate)
+        best = ranked[0]
+        verdict.value = f"Cheapest: {best.quote.name}, {best.cost_pct:.2f}% total cost"
+        verdict.color = COLORS[best.level]
+        for r in ranked:
+            q = r.quote
+            lines = [
+                f"Pay {q.pays:,.2f} {mid.base}, they get {q.gets:,.2f} {mid.quote} "
+                f"(effective rate {r.effective_rate:,.4f})",
+                f"Reference would give {r.ideal_gets:,.2f}: you lose {r.lost_target:,.2f} {mid.quote} "
+                f"(about {r.lost_source:,.2f} {mid.base})",
+            ]
+            if r.markup_pct is not None:
+                lines.append(f"Rate markup {r.markup_pct:.2f}%, implied fee {r.implied_fee:,.2f} {mid.base}")
+            lines += r.notes
+            results.controls.append(
+                ft.ListTile(
+                    leading=ft.Icon(ICONS[r.level], color=COLORS[r.level]),
+                    title=ft.Text(f"{q.name}   {r.cost_pct:.2f}%"),
+                    subtitle=ft.Text("\n".join(lines), size=12),
+                    trailing=ft.IconButton(
+                        icon=ft.Icons.DELETE_OUTLINE, tooltip="Remove",
+                        on_click=lambda e, q=q: remove(q),
+                    ),
+                    dense=True,
+                )
+            )
+
+    def remove(q: fx.Quote) -> None:
+        state["quotes"].remove(q)
+        render()
+        page.update()
+
+    def on_pair_change(e) -> None:
+        # quotes are in the old currencies, so they no longer apply
+        state["mid"] = None
+        state["quotes"].clear()
+        relabel()
+        ref_text.value = msg.value = verdict.value = ""
+        attribution.visible = False
+        results.controls.clear()
+        page.update()
+
+    src.on_select = on_pair_change
+    dst.on_select = on_pair_change
+
+    async def get_rate(e=None) -> bool:
+        progress.visible = True
+        msg.value = ""
+        page.update()
+        try:
+            mid = await asyncio.to_thread(fx.fetch_mid, src.value, dst.value)
+        except fx.RateError as ex:
+            msg.value = str(ex)
+            progress.visible = False
+            page.update()
+            return False
+        state["mid"] = mid
+        ref_text.value = (
+            f"Reference: 1 {mid.base} = {mid.rate:,.4f} {mid.quote} ({mid.source}, {mid.date}). "
+            "Daily rate, not live, so costs can be off by a few tenths of a percent."
+        )
+        attribution.visible = mid.source == "ExchangeRate-API"
+        progress.visible = False
+        render()
+        page.update()
+        return True
+
+    def num(s: str | None) -> float:
+        return float((s or "").replace(",", "").strip())
+
+    async def on_add(e) -> None:
+        msg.value = ""
+        try:
+            pays, gets = num(pays_f.value), num(gets_f.value)
+            rate = num(rate_f.value) if (rate_f.value or "").strip() else None
+        except ValueError:
+            msg.value = "Enter numbers for the amounts (and the rate, if you fill it in)."
+            page.update()
+            return
+        if pays <= 0 or gets <= 0 or (rate is not None and rate <= 0):
+            msg.value = "Amounts and rate must be greater than zero."
+            page.update()
+            return
+        if state["mid"] is None and not await get_rate():
+            return
+        name = (name_f.value or "").strip() or f"Provider {len(state['quotes']) + 1}"
+        state["quotes"].append(fx.Quote(name, pays, gets, rate))
+        # keep the pay amount: you usually compare providers for the same send amount
+        name_f.value = gets_f.value = rate_f.value = ""
+        render()
+        page.update()
+
+    def on_clear(e) -> None:
+        state["quotes"].clear()
+        render()
+        page.update()
+
+    rate_btn.on_click = get_rate
+    add_btn.on_click = on_add
+    clear_btn.on_click = on_clear
+
+    return ft.Column(
+        [
+            ft.Row([src, dst, rate_btn, progress], wrap=True),
+            ref_text,
+            attribution,
+            ft.Text(
+                "Type what the provider's app shows. 'You pay' must include all fees.",
+                size=12,
+                italic=True,
+            ),
+            name_f,
+            ft.Row([pays_f, gets_f]),
+            ft.Row([rate_f]),
+            ft.Row([add_btn, clear_btn]),
+            msg,
+            verdict,
+            results,
+        ],
+        expand=True,
+        scroll=ft.ScrollMode.AUTO,
+    )
+
+
 def placeholder(title: str) -> ft.Control:
     return ft.Container(ft.Text(f"{title}: coming soon"), alignment=ft.Alignment(0, 0), expand=True)
 
@@ -288,7 +452,7 @@ def main(page: ft.Page):
         ("Network", ft.Icons.WIFI, network_tab(page)),
         ("QR", ft.Icons.QR_CODE_SCANNER, qr_tab(page)),
         ("Prices", ft.Icons.SHOW_CHART, prices_tab(page)),
-        ("FX", ft.Icons.CURRENCY_EXCHANGE, placeholder("Remittance and FX fees")),
+        ("FX", ft.Icons.CURRENCY_EXCHANGE, fx_tab(page)),
     ]
     body = ft.Container(tabs[0][2], expand=True)
 
