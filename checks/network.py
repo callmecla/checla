@@ -10,6 +10,7 @@ import socket
 import ssl
 from dataclasses import dataclass, field
 
+import certifi
 import httpx
 
 DOMAINS = [
@@ -58,8 +59,14 @@ def doh_resolve(domain: str) -> set[str]:
 
 
 def tls_issuer(domain: str) -> tuple[bool, str]:
-    """Full chain validation against the OS trust store; returns issuer org."""
-    ctx = ssl.create_default_context()
+    """Full chain validation; returns issuer org.
+
+    Uses the certifi (Mozilla) CA bundle explicitly rather than the OS store:
+    Python on Android has no OS trust store configured, which would make every
+    site look untrusted. A side effect worth having for this app: a MITM using
+    a locally installed root certificate is flagged instead of trusted.
+    """
+    ctx = ssl.create_default_context(cafile=certifi.where())
     try:
         with socket.create_connection((domain, 443), timeout=6) as sock:
             with ctx.wrap_socket(sock, server_hostname=domain) as tls:

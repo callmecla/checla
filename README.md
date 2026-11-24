@@ -17,7 +17,7 @@ flet run --web main.py  # browser (camera scan works here)
 
 ## Build
 ```
-flet build apk          # Android
+flet build apk --split-per-abi --yes -v   # Android; APKs land in build/apk (install the arm64-v8a one)
 flet build ipa          # iOS (needs a Mac with Xcode)
 ```
 
